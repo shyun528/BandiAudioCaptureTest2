@@ -30,6 +30,8 @@ jobs:
           unzip -q /tmp/vosk.zip -d /tmp/vosk-model
           mv /tmp/vosk-model/vosk-model-small-en-us-0.15 \
              app/src/main/assets/model-en-us
+          printf 'bandi-en-us-small-0.15-v1\n' > app/src/main/assets/model-en-us/uuid
+          test -s app/src/main/assets/model-en-us/uuid
 
       - name: Build APK
         run: gradle assembleDebug
@@ -37,5 +39,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: BandiAudioCaptureTest-v4-APK
+          name: BandiAudioCaptureTest-v5-APK
           path: app/build/outputs/apk/debug/app-debug.apk
