@@ -21,11 +21,21 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      - name: Download Vosk English model
+        run: |
+          mkdir -p app/src/main/assets
+          curl -L --fail --retry 3 \
+            https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip \
+            -o /tmp/vosk.zip
+          unzip -q /tmp/vosk.zip -d /tmp/vosk-model
+          mv /tmp/vosk-model/vosk-model-small-en-us-0.15 \
+             app/src/main/assets/model-en-us
+
       - name: Build APK
         run: gradle assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: BandiAudioCaptureTest-APK
+          name: BandiAudioCaptureTest-v4-APK
           path: app/build/outputs/apk/debug/app-debug.apk

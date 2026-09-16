@@ -11,6 +11,7 @@ import android.os.Handler;
 import android.view.Gravity;
 import android.widget.Button;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
 public class MainActivity extends Activity {
@@ -19,6 +20,7 @@ public class MainActivity extends Activity {
     private static final int REQ_CAPTURE = 200;
 
     private TextView status;
+    private TextView transcript;
     private final Handler handler = new Handler();
 
     @Override
@@ -27,17 +29,18 @@ public class MainActivity extends Activity {
 
         LinearLayout layout = new LinearLayout(this);
         layout.setOrientation(LinearLayout.VERTICAL);
-        layout.setPadding(50,100,50,50);
+        layout.setPadding(45, 70, 45, 50);
         layout.setGravity(Gravity.CENTER_HORIZONTAL);
 
         TextView title = new TextView(this);
-        title.setText("반디 학습 녹음 테스트 v3");
-        title.setTextSize(24);
+        title.setText("반디 영어 학습 v4");
+        title.setTextSize(25);
 
         TextView guide = new TextView(this);
         guide.setText(
-            "\n반디의 내부 음성을 WAV 파일로 저장합니다.\n" +
-            "블루투스 이어폰을 그대로 사용하셔도 됩니다.\n"
+                "\n반디 내부 음성을 녹음한 뒤\n" +
+                "무료 오프라인 STT로 영어 원문을 만듭니다.\n" +
+                "블루투스 이어폰을 그대로 사용하셔도 됩니다.\n"
         );
         guide.setTextSize(16);
 
@@ -50,19 +53,35 @@ public class MainActivity extends Activity {
         start.setOnClickListener(v -> beginCapture());
 
         Button stop = new Button(this);
-        stop.setText("학습 녹음 종료");
+        stop.setText("녹음 종료 + 영어 변환");
         stop.setOnClickListener(v -> {
-            stopService(new Intent(this, CaptureService.class));
-            status.setText("녹음을 종료하고 WAV 파일을 완성하는 중입니다...");
+            Intent i = new Intent(this, CaptureService.class);
+            i.setAction(CaptureService.ACTION_STOP);
+            startService(i);
+            status.setText("녹음을 종료하고 영어로 변환합니다...");
         });
+
+        TextView transcriptTitle = new TextView(this);
+        transcriptTitle.setText("\n영어 스크립트");
+        transcriptTitle.setTextSize(20);
+
+        transcript = new TextView(this);
+        transcript.setText("아직 생성된 스크립트가 없습니다.");
+        transcript.setTextSize(17);
+        transcript.setTextIsSelectable(true);
+        transcript.setPadding(10,20,10,40);
 
         layout.addView(title);
         layout.addView(guide);
         layout.addView(status);
         layout.addView(start);
         layout.addView(stop);
+        layout.addView(transcriptTitle);
+        layout.addView(transcript);
 
-        setContentView(layout);
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(layout);
+        setContentView(scroll);
 
         handler.post(updateStatus);
     }
@@ -71,44 +90,52 @@ public class MainActivity extends Activity {
         @Override
         public void run() {
 
-            boolean active = getSharedPreferences("capture", MODE_PRIVATE)
-                    .getBoolean("active", false);
+            android.content.SharedPreferences p =
+                    getSharedPreferences("capture", MODE_PRIVATE);
 
-            float rms = getSharedPreferences("capture", MODE_PRIVATE)
-                    .getFloat("rms", 0f);
+            boolean active = p.getBoolean("active", false);
+            boolean transcribing = p.getBoolean("transcribing", false);
+            boolean completed = p.getBoolean("completed", false);
 
-            String file = getSharedPreferences("capture", MODE_PRIVATE)
-                    .getString("file", "");
-
-            long bytes = getSharedPreferences("capture", MODE_PRIVATE)
-                    .getLong("bytes", 0);
-
-            long seconds = getSharedPreferences("capture", MODE_PRIVATE)
-                    .getLong("seconds", 0);
-
-            boolean completed = getSharedPreferences("capture", MODE_PRIVATE)
-                    .getBoolean("completed", false);
+            float rms = p.getFloat("rms", 0f);
+            long seconds = p.getLong("seconds", 0);
+            String file = p.getString("file", "");
+            String text = p.getString("transcript", "");
+            String error = p.getString("stt_error", "");
 
             if (active) {
-
                 status.setText(
-                    "● 녹음 중\n\n" +
-                    "RMS: " + String.format("%.1f", rms) +
-                    "\n녹음 시간: " + seconds + "초" +
-                    "\n\n반디로 이동해서 학습하세요."
+                        "● 녹음 중\n\n" +
+                        "RMS: " + String.format("%.1f", rms) +
+                        "\n녹음 시간: " + seconds + "초\n\n" +
+                        "반디로 이동해서 학습하세요."
                 );
-
+            } else if (transcribing) {
+                status.setText(
+                        "영어 음성을 분석하고 있습니다...\n\n" +
+                        "녹음 시간: " + seconds + "초\n" +
+                        "잠시 기다려 주세요."
+                );
             } else if (completed) {
-
-                status.setText(
-                    "✓ 녹음 완료\n\n" +
-                    "녹음 시간: " + seconds + "초\n" +
-                    "파일 크기: " + (bytes / 1024) + " KB\n\n" +
-                    "저장 위치:\n" + file
-                );
+                if (!error.isEmpty()) {
+                    status.setText(
+                            "녹음은 저장됐지만 STT 오류가 발생했습니다.\n\n" +
+                            error + "\n\nWAV:\n" + file
+                    );
+                } else {
+                    status.setText(
+                            "✓ 완료\n\n" +
+                            "녹음 시간: " + seconds + "초\n\n" +
+                            "WAV:\n" + file
+                    );
+                }
             }
 
-            handler.postDelayed(this,500);
+            if (!text.isEmpty()) {
+                transcript.setText(text);
+            }
+
+            handler.postDelayed(this, 500);
         }
     };
 
@@ -126,7 +153,7 @@ public class MainActivity extends Activity {
 
         getSharedPreferences("capture", MODE_PRIVATE)
                 .edit()
-                .putBoolean("completed", false)
+                .clear()
                 .apply();
 
         MediaProjectionManager manager =
@@ -162,17 +189,18 @@ public class MainActivity extends Activity {
             int resultCode,
             Intent data) {
 
-        super.onActivityResult(requestCode,resultCode,data);
+        super.onActivityResult(requestCode, resultCode, data);
 
         if (requestCode == REQ_CAPTURE
                 && resultCode == RESULT_OK
                 && data != null) {
 
             Intent service =
-                    new Intent(this,CaptureService.class);
+                    new Intent(this, CaptureService.class);
 
-            service.putExtra("resultCode",resultCode);
-            service.putExtra("data",data);
+            service.setAction(CaptureService.ACTION_START);
+            service.putExtra("resultCode", resultCode);
+            service.putExtra("data", data);
 
             startForegroundService(service);
 

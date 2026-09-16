@@ -13,6 +13,11 @@ import android.os.Build;
 import android.os.IBinder;
 import android.provider.MediaStore;
 
+import org.json.JSONObject;
+import org.vosk.Model;
+import org.vosk.Recognizer;
+import org.vosk.android.StorageService;
+
 import java.io.*;
 import java.text.SimpleDateFormat;
 import java.util.Date;
@@ -20,16 +25,23 @@ import java.util.Locale;
 
 public class CaptureService extends Service {
 
+    public static final String ACTION_START = "BANDI_START";
+    public static final String ACTION_STOP = "BANDI_STOP";
+
     private static final String CHANNEL = "capture_channel";
 
     private static final int SAMPLE_RATE = 44100;
     private static final int CHANNELS = 2;
     private static final int BITS = 16;
+    private static final int STT_RATE = 16000;
 
     private AudioRecord recorder;
     private MediaProjection projection;
 
     private volatile boolean running = false;
+    private volatile boolean finishing = false;
+
+    private Thread captureThread;
 
     private File pcmFile;
     private FileOutputStream pcmOutput;
@@ -61,10 +73,21 @@ public class CaptureService extends Service {
             int flags,
             int startId) {
 
+        if (intent == null) return START_NOT_STICKY;
+
+        if (ACTION_STOP.equals(intent.getAction())) {
+            finishRecording();
+            return START_NOT_STICKY;
+        }
+
+        if (!ACTION_START.equals(intent.getAction())) {
+            return START_NOT_STICKY;
+        }
+
         Notification notification =
-                new Notification.Builder(this,CHANNEL)
+                new Notification.Builder(this, CHANNEL)
                         .setContentTitle("반디 학습 녹음 중")
-                        .setContentText("내부 오디오를 WAV로 저장하고 있습니다.")
+                        .setContentText("내부 오디오를 녹음하고 있습니다.")
                         .setSmallIcon(android.R.drawable.ic_btn_speak_now)
                         .build();
 
@@ -75,7 +98,7 @@ public class CaptureService extends Service {
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
             );
         } else {
-            startForeground(1,notification);
+            startForeground(1, notification);
         }
 
         try {
@@ -129,7 +152,7 @@ public class CaptureService extends Service {
                     new AudioRecord.Builder()
                             .setAudioFormat(format)
                             .setBufferSizeInBytes(
-                                    Math.max(minBuffer * 2,65536)
+                                    Math.max(minBuffer * 2, 65536)
                             )
                             .setAudioPlaybackCaptureConfig(config)
                             .build();
@@ -149,24 +172,32 @@ public class CaptureService extends Service {
             recorder.startRecording();
 
             running = true;
+            finishing = false;
 
-            getSharedPreferences("capture",MODE_PRIVATE)
+            getSharedPreferences("capture", MODE_PRIVATE)
                     .edit()
-                    .putBoolean("active",true)
-                    .putBoolean("completed",false)
-                    .putFloat("rms",0f)
-                    .putLong("bytes",0)
-                    .putLong("seconds",0)
+                    .putBoolean("active", true)
+                    .putBoolean("transcribing", false)
+                    .putBoolean("completed", false)
+                    .putString("transcript", "")
+                    .putString("stt_error", "")
                     .apply();
 
-            new Thread(this::captureLoop).start();
+            captureThread =
+                    new Thread(this::captureLoop);
+
+            captureThread.start();
 
         } catch (Exception e) {
 
-            getSharedPreferences("capture",MODE_PRIVATE)
+            getSharedPreferences("capture", MODE_PRIVATE)
                     .edit()
-                    .putBoolean("active",false)
-                    .putBoolean("completed",false)
+                    .putBoolean("active", false)
+                    .putString(
+                            "stt_error",
+                            "녹음 시작 오류: " +
+                                    e.getClass().getSimpleName()
+                    )
                     .apply();
 
             stopSelf();
@@ -199,13 +230,13 @@ public class CaptureService extends Service {
 
                         short s = samples[i];
 
-                        sum += (double)s * s;
+                        sum += (double) s * s;
 
                         bytes[i * 2] =
-                                (byte)(s & 0xff);
+                                (byte) (s & 0xff);
 
                         bytes[i * 2 + 1] =
-                                (byte)((s >> 8) & 0xff);
+                                (byte) ((s >> 8) & 0xff);
                     }
 
                     int byteCount = n * 2;
@@ -219,7 +250,7 @@ public class CaptureService extends Service {
                     totalBytes += byteCount;
 
                     float rms =
-                            (float)Math.sqrt(sum / n);
+                            (float) Math.sqrt(sum / n);
 
                     long seconds =
                             (System.currentTimeMillis()
@@ -229,9 +260,9 @@ public class CaptureService extends Service {
                             "capture",
                             MODE_PRIVATE
                     ).edit()
-                            .putFloat("rms",rms)
-                            .putLong("bytes",totalBytes)
-                            .putLong("seconds",seconds)
+                            .putFloat("rms", rms)
+                            .putLong("bytes", totalBytes)
+                            .putLong("seconds", seconds)
                             .apply();
                 }
             }
@@ -240,71 +271,281 @@ public class CaptureService extends Service {
         }
     }
 
-    @Override
-    public void onDestroy() {
+    private synchronized void finishRecording() {
 
-        running = false;
+        if (finishing) return;
+        finishing = true;
 
-        try {
-            if (recorder != null) {
-                recorder.stop();
+        new Thread(() -> {
+
+            running = false;
+
+            try {
+                if (recorder != null) recorder.stop();
+            } catch (Exception ignored) {}
+
+            try {
+                if (captureThread != null) captureThread.join(3000);
+            } catch (Exception ignored) {}
+
+            try {
+                if (pcmOutput != null) {
+                    pcmOutput.flush();
+                    pcmOutput.close();
+                }
+            } catch (Exception ignored) {}
+
+            try {
+                if (recorder != null) recorder.release();
+            } catch (Exception ignored) {}
+
+            recorder = null;
+
+            String savedPath;
+
+            try {
+                savedPath = createWav();
+            } catch (Exception e) {
+                savedPath =
+                        "WAV 저장 실패: " +
+                                e.getClass().getSimpleName();
             }
-        } catch (Exception ignored) {}
 
-        try {
-            if (pcmOutput != null) {
-                pcmOutput.flush();
-                pcmOutput.close();
+            long seconds =
+                    startTime == 0
+                            ? 0
+                            : (System.currentTimeMillis()
+                            - startTime) / 1000;
+
+            getSharedPreferences("capture", MODE_PRIVATE)
+                    .edit()
+                    .putBoolean("active", false)
+                    .putBoolean("transcribing", true)
+                    .putBoolean("completed", false)
+                    .putLong("seconds", seconds)
+                    .putString("file", savedPath)
+                    .apply();
+
+            if (projection != null) {
+                try {
+                    projection.stop();
+                } catch (Exception ignored) {}
+                projection = null;
             }
-        } catch (Exception ignored) {}
+
+            startVosk();
+
+        }).start();
+    }
+
+    private void startVosk() {
 
         try {
-            if (recorder != null) {
-                recorder.release();
+
+            StorageService.unpack(
+                    this,
+                    "model-en-us",
+                    "model-en-us",
+                    model -> new Thread(() ->
+                            transcribe(model)
+                    ).start(),
+                    exception -> {
+                        finishWithError(
+                                "영어 모델 로딩 실패: " +
+                                        exception.getMessage()
+                        );
+                    }
+            );
+
+        } catch (Exception e) {
+            finishWithError(
+                    "영어 모델 시작 실패: " +
+                            e.getClass().getSimpleName()
+            );
+        }
+    }
+
+    private void transcribe(Model model) {
+
+        Recognizer recognizer = null;
+
+        try {
+
+            recognizer =
+                    new Recognizer(
+                            model,
+                            (float) STT_RATE
+                    );
+
+            FileInputStream in =
+                    new FileInputStream(pcmFile);
+
+            byte[] stereoBytes =
+                    new byte[16384];
+
+            StringBuilder transcript =
+                    new StringBuilder();
+
+            long phase = 0;
+
+            int read;
+
+            while ((read = in.read(stereoBytes)) > 0) {
+
+                int usable = read - (read % 4);
+
+                ByteArrayOutputStream mono16 =
+                        new ByteArrayOutputStream();
+
+                for (int i = 0; i < usable; i += 4) {
+
+                    short left =
+                            (short) (
+                                    (stereoBytes[i] & 0xff) |
+                                    (stereoBytes[i + 1] << 8)
+                            );
+
+                    short right =
+                            (short) (
+                                    (stereoBytes[i + 2] & 0xff) |
+                                    (stereoBytes[i + 3] << 8)
+                            );
+
+                    short mono =
+                            (short) (
+                                    ((int) left + (int) right) / 2
+                            );
+
+                    phase += STT_RATE;
+
+                    if (phase >= SAMPLE_RATE) {
+
+                        phase -= SAMPLE_RATE;
+
+                        mono16.write(
+                                mono & 0xff
+                        );
+
+                        mono16.write(
+                                (mono >> 8) & 0xff
+                        );
+                    }
+                }
+
+                byte[] speech =
+                        mono16.toByteArray();
+
+                if (speech.length > 0) {
+
+                    if (recognizer.acceptWaveForm(
+                            speech,
+                            speech.length)) {
+
+                        appendText(
+                                transcript,
+                                recognizer.getResult()
+                        );
+                    }
+                }
             }
-        } catch (Exception ignored) {}
 
-        String savedPath = "";
+            in.close();
 
-        try {
+            appendText(
+                    transcript,
+                    recognizer.getFinalResult()
+            );
 
-            savedPath = createWav();
+            String finalText =
+                    transcript.toString()
+                            .trim()
+                            .replaceAll("\\s+", " ");
+
+            String txtPath = "";
+
+            if (!finalText.isEmpty()) {
+                txtPath = saveTranscript(finalText);
+            }
+
+            getSharedPreferences("capture", MODE_PRIVATE)
+                    .edit()
+                    .putBoolean("transcribing", false)
+                    .putBoolean("completed", true)
+                    .putString("transcript", finalText)
+                    .putString("transcript_file", txtPath)
+                    .putString("stt_error", "")
+                    .apply();
 
         } catch (Exception e) {
 
-            savedPath =
-                    "WAV 저장 실패: "
-                            + e.getClass().getSimpleName();
-        }
+            finishWithError(
+                    "STT 변환 오류: " +
+                            e.getClass().getSimpleName() +
+                            " / " +
+                            String.valueOf(e.getMessage())
+            );
 
-        long seconds =
-                startTime == 0
-                        ? 0
-                        : (System.currentTimeMillis()
-                        - startTime) / 1000;
+        } finally {
 
-        getSharedPreferences(
-                "capture",
-                MODE_PRIVATE
-        ).edit()
-                .putBoolean("active",false)
-                .putBoolean("completed",true)
-                .putLong("bytes",totalBytes + 44)
-                .putLong("seconds",seconds)
-                .putString("file",savedPath)
-                .apply();
+            if (recognizer != null) {
+                try {
+                    recognizer.close();
+                } catch (Exception ignored) {}
+            }
 
-        if (projection != null) {
             try {
-                projection.stop();
+                model.close();
             } catch (Exception ignored) {}
+
+            if (pcmFile != null) {
+                pcmFile.delete();
+            }
+
+            stopForeground(true);
+            stopSelf();
         }
+    }
+
+    private void appendText(
+            StringBuilder builder,
+            String json) {
+
+        try {
+
+            JSONObject obj =
+                    new JSONObject(json);
+
+            String text =
+                    obj.optString("text", "").trim();
+
+            if (!text.isEmpty()) {
+
+                if (builder.length() > 0) {
+                    builder.append(" ");
+                }
+
+                builder.append(text);
+            }
+
+        } catch (Exception ignored) {}
+    }
+
+    private void finishWithError(String message) {
+
+        getSharedPreferences("capture", MODE_PRIVATE)
+                .edit()
+                .putBoolean("active", false)
+                .putBoolean("transcribing", false)
+                .putBoolean("completed", true)
+                .putString("stt_error", message)
+                .apply();
 
         if (pcmFile != null) {
             pcmFile.delete();
         }
 
-        super.onDestroy();
+        stopForeground(true);
+        stopSelf();
     }
 
     private String createWav()
@@ -376,10 +617,71 @@ public class CaptureService extends Service {
         int read;
 
         while ((read = in.read(buffer)) != -1) {
-            out.write(buffer,0,read);
+            out.write(buffer, 0, read);
         }
 
         in.close();
+        out.flush();
+        out.close();
+
+        return "Download/BandiStudy/" + fileName;
+    }
+
+    private String saveTranscript(String text)
+            throws IOException {
+
+        String stamp =
+                new SimpleDateFormat(
+                        "yyyyMMdd_HHmmss",
+                        Locale.KOREA
+                ).format(new Date());
+
+        String fileName =
+                "Bandi_" + stamp + "_English.txt";
+
+        ContentValues values =
+                new ContentValues();
+
+        values.put(
+                MediaStore.MediaColumns.DISPLAY_NAME,
+                fileName
+        );
+
+        values.put(
+                MediaStore.MediaColumns.MIME_TYPE,
+                "text/plain"
+        );
+
+        values.put(
+                MediaStore.MediaColumns.RELATIVE_PATH,
+                "Download/BandiStudy"
+        );
+
+        Uri uri =
+                getContentResolver()
+                        .insert(
+                                MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                                values
+                        );
+
+        if (uri == null) {
+            throw new IOException("TXT insert failed");
+        }
+
+        OutputStream out =
+                getContentResolver()
+                        .openOutputStream(uri);
+
+        if (out == null) {
+            throw new IOException("TXT output failed");
+        }
+
+        out.write(
+                text.getBytes(
+                        java.nio.charset.StandardCharsets.UTF_8
+                )
+        );
+
         out.flush();
         out.close();
 
@@ -407,7 +709,7 @@ public class CaptureService extends Service {
         header[2] = 'F';
         header[3] = 'F';
 
-        writeInt(header,4,(int)dataLength);
+        writeInt(header, 4, (int) dataLength);
 
         header[8] = 'W';
         header[9] = 'A';
@@ -419,28 +721,24 @@ public class CaptureService extends Service {
         header[14] = 't';
         header[15] = ' ';
 
-        writeInt(header,16,16);
+        writeInt(header, 16, 16);
 
         header[20] = 1;
         header[21] = 0;
 
-        header[22] = (byte)channels;
+        header[22] = (byte) channels;
         header[23] = 0;
 
-        writeInt(header,24,sampleRate);
-        writeInt(header,28,(int)byteRate);
+        writeInt(header, 24, sampleRate);
+        writeInt(header, 28, (int) byteRate);
 
         int blockAlign =
                 channels * bits / 8;
 
-        header[32] =
-                (byte)blockAlign;
-
+        header[32] = (byte) blockAlign;
         header[33] = 0;
 
-        header[34] =
-                (byte)bits;
-
+        header[34] = (byte) bits;
         header[35] = 0;
 
         header[36] = 'd';
@@ -451,7 +749,7 @@ public class CaptureService extends Service {
         writeInt(
                 header,
                 40,
-                (int)audioLength
+                (int) audioLength
         );
 
         out.write(header);
@@ -463,16 +761,45 @@ public class CaptureService extends Service {
             int value) {
 
         data[offset] =
-                (byte)(value & 0xff);
+                (byte) (value & 0xff);
 
         data[offset + 1] =
-                (byte)((value >> 8) & 0xff);
+                (byte) ((value >> 8) & 0xff);
 
         data[offset + 2] =
-                (byte)((value >> 16) & 0xff);
+                (byte) ((value >> 16) & 0xff);
 
         data[offset + 3] =
-                (byte)((value >> 24) & 0xff);
+                (byte) ((value >> 24) & 0xff);
+    }
+
+    @Override
+    public void onDestroy() {
+
+        running = false;
+
+        if (!finishing) {
+
+            try {
+                if (recorder != null) recorder.stop();
+            } catch (Exception ignored) {}
+
+            try {
+                if (pcmOutput != null) pcmOutput.close();
+            } catch (Exception ignored) {}
+
+            try {
+                if (recorder != null) recorder.release();
+            } catch (Exception ignored) {}
+
+            if (projection != null) {
+                try {
+                    projection.stop();
+                } catch (Exception ignored) {}
+            }
+        }
+
+        super.onDestroy();
     }
 
     @Override
