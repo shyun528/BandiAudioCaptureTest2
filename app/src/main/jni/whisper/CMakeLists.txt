@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.10)
 project(whisper.cpp)
 
 set(CMAKE_CXX_STANDARD 17)
-set(WHISPER_LIB_DIR ${CMAKE_SOURCE_DIR}/../../../../../../../)
+set(WHISPER_LIB_DIR ${CMAKE_SOURCE_DIR}/../../../../../whisper-source)
 
 # Get whisper.cpp version
 file(READ "${WHISPER_LIB_DIR}/CMakeLists.txt" MAIN_CMAKE_CONTENT)
