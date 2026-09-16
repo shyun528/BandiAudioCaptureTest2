@@ -21,17 +21,14 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Download Vosk English model
+      - name: Download Whisper tiny.en model
         run: |
-          mkdir -p app/src/main/assets
+          mkdir -p app/src/main/assets/models
           curl -L --fail --retry 3 \
-            https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip \
-            -o /tmp/vosk.zip
-          unzip -q /tmp/vosk.zip -d /tmp/vosk-model
-          mv /tmp/vosk-model/vosk-model-small-en-us-0.15 \
-             app/src/main/assets/model-en-us
-          printf 'bandi-en-us-small-0.15-v1\n' > app/src/main/assets/model-en-us/uuid
-          test -s app/src/main/assets/model-en-us/uuid
+            https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin \
+            -o app/src/main/assets/models/ggml-tiny.en.bin
+          test -s app/src/main/assets/models/ggml-tiny.en.bin
+          ls -lh app/src/main/assets/models/ggml-tiny.en.bin
 
       - name: Build APK
         run: gradle assembleDebug
@@ -39,5 +36,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: BandiAudioCaptureTest-v6-NativeTest-APK
+          name: BandiAudioCaptureTest-v6-Whisper-APK
           path: app/build/outputs/apk/debug/app-debug.apk

@@ -33,7 +33,7 @@ public class MainActivity extends Activity {
         layout.setGravity(Gravity.CENTER_HORIZONTAL);
 
         TextView title = new TextView(this);
-        title.setText("반디 영어 학습 v4");
+        title.setText("반디 영어 학습 v6 · Whisper");
         title.setTextSize(25);
 
         TextView guide = new TextView(this);

@@ -10,8 +10,8 @@ android {
         applicationId = "com.example.bandiaudiocapture"
         minSdk = 29
         targetSdk = 35
-        versionCode = 4
-        versionName = "4.0"
+        versionCode = 6
+        versionName = "6.0"
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -23,6 +23,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    androidResources {
+        noCompress += "bin"
+    }
+
     externalNativeBuild {
         cmake {
             path = file("src/main/jni/whisper/CMakeLists.txt")
@@ -32,6 +36,4 @@ android {
 }
 
 dependencies {
-    implementation("net.java.dev.jna:jna:5.18.1@aar")
-    implementation("com.alphacephei:vosk-android:0.3.75@aar")
 }

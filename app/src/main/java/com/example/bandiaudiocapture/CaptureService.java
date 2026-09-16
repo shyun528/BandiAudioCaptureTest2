@@ -13,10 +13,8 @@ import android.os.Build;
 import android.os.IBinder;
 import android.provider.MediaStore;
 
-import org.json.JSONObject;
-import org.vosk.Model;
-import org.vosk.Recognizer;
-import org.vosk.android.StorageService;
+
+import com.whispercpp.java.whisper.WhisperLib;
 
 import java.io.*;
 import java.text.SimpleDateFormat;
@@ -333,128 +331,86 @@ public class CaptureService extends Service {
                 projection = null;
             }
 
-            startVosk();
+            startWhisper();
 
         }).start();
     }
 
-    private void startVosk() {
+    private void startWhisper() {
 
-        try {
-
-            StorageService.unpack(
-                    this,
-                    "model-en-us",
-                    "model-en-us",
-                    model -> new Thread(() ->
-                            transcribe(model)
-                    ).start(),
-                    exception -> {
-                        finishWithError(
-                                "영어 모델 로딩 실패: " +
-                                        exception.getMessage()
-                        );
-                    }
-            );
-
-        } catch (Exception e) {
-            finishWithError(
-                    "영어 모델 시작 실패: " +
-                            e.getClass().getSimpleName()
-            );
-        }
+        new Thread(() -> transcribeWithWhisper()).start();
     }
 
-    private void transcribe(Model model) {
+    private void transcribeWithWhisper() {
 
-        Recognizer recognizer = null;
+        WhisperLib whisper = null;
+        long context = 0;
 
         try {
 
-            recognizer =
-                    new Recognizer(
-                            model,
-                            (float) STT_RATE
+            float[] audio = convertPcmToWhisperAudio();
+
+            if (audio.length == 0) {
+                throw new IOException("녹음된 음성이 없습니다.");
+            }
+
+            whisper = new WhisperLib();
+
+            context = whisper.initContextFromAsset(
+                    getAssets(),
+                    "models/ggml-tiny.en.bin"
+            );
+
+            if (context == 0) {
+                throw new IOException(
+                        "Whisper 모델을 열 수 없습니다."
+                );
+            }
+
+            int threads =
+                    Math.max(
+                            2,
+                            Math.min(
+                                    4,
+                                    Runtime.getRuntime()
+                                            .availableProcessors()
+                            )
                     );
 
-            FileInputStream in =
-                    new FileInputStream(pcmFile);
+            whisper.fullTranscribe(
+                    context,
+                    threads,
+                    audio
+            );
 
-            byte[] stereoBytes =
-                    new byte[16384];
+            int count =
+                    whisper.getTextSegmentCount(context);
 
             StringBuilder transcript =
                     new StringBuilder();
 
-            long phase = 0;
+            for (int i = 0; i < count; i++) {
 
-            int read;
-
-            while ((read = in.read(stereoBytes)) > 0) {
-
-                int usable = read - (read % 4);
-
-                ByteArrayOutputStream mono16 =
-                        new ByteArrayOutputStream();
-
-                for (int i = 0; i < usable; i += 4) {
-
-                    short left =
-                            (short) (
-                                    (stereoBytes[i] & 0xff) |
-                                    (stereoBytes[i + 1] << 8)
-                            );
-
-                    short right =
-                            (short) (
-                                    (stereoBytes[i + 2] & 0xff) |
-                                    (stereoBytes[i + 3] << 8)
-                            );
-
-                    short mono =
-                            (short) (
-                                    ((int) left + (int) right) / 2
-                            );
-
-                    phase += STT_RATE;
-
-                    if (phase >= SAMPLE_RATE) {
-
-                        phase -= SAMPLE_RATE;
-
-                        mono16.write(
-                                mono & 0xff
+                String text =
+                        whisper.getTextSegment(
+                                context,
+                                i
                         );
 
-                        mono16.write(
-                                (mono >> 8) & 0xff
-                        );
-                    }
-                }
+                if (text != null) {
 
-                byte[] speech =
-                        mono16.toByteArray();
+                    text = text.trim();
 
-                if (speech.length > 0) {
+                    if (!text.isEmpty()) {
 
-                    if (recognizer.acceptWaveForm(
-                            speech,
-                            speech.length)) {
+                        if (transcript.length() > 0) {
+                            transcript.append(" ");
+                        }
 
-                        appendText(
-                                transcript,
-                                recognizer.getResult()
-                        );
+                        transcript.append(text);
                     }
                 }
             }
-
-            in.close();
-
-            appendText(
-                    transcript,
-                    recognizer.getFinalResult()
-            );
 
             String finalText =
                     transcript.toString()
@@ -467,67 +423,131 @@ public class CaptureService extends Service {
                 txtPath = saveTranscript(finalText);
             }
 
-            getSharedPreferences("capture", MODE_PRIVATE)
-                    .edit()
+            getSharedPreferences(
+                    "capture",
+                    MODE_PRIVATE
+            ).edit()
                     .putBoolean("transcribing", false)
                     .putBoolean("completed", true)
                     .putString("transcript", finalText)
-                    .putString("transcript_file", txtPath)
+                    .putString(
+                            "transcript_file",
+                            txtPath
+                    )
                     .putString("stt_error", "")
                     .apply();
 
-        } catch (Exception e) {
+        } catch (Throwable e) {
 
             finishWithError(
-                    "STT 변환 오류: " +
-                            e.getClass().getSimpleName() +
-                            " / " +
-                            String.valueOf(e.getMessage())
+                    "Whisper 변환 오류: "
+                            + e.getClass().getSimpleName()
+                            + " / "
+                            + String.valueOf(e.getMessage())
             );
+
+            return;
 
         } finally {
 
-            if (recognizer != null) {
+            if (whisper != null && context != 0) {
                 try {
-                    recognizer.close();
-                } catch (Exception ignored) {}
+                    whisper.freeContext(context);
+                } catch (Throwable ignored) {}
             }
-
-            try {
-                model.close();
-            } catch (Exception ignored) {}
 
             if (pcmFile != null) {
                 pcmFile.delete();
             }
-
-            stopForeground(true);
-            stopSelf();
         }
+
+        stopForeground(true);
+        stopSelf();
     }
 
-    private void appendText(
-            StringBuilder builder,
-            String json) {
+    private float[] convertPcmToWhisperAudio()
+            throws IOException {
 
-        try {
+        long stereoFrames =
+                pcmFile.length() / 4;
 
-            JSONObject obj =
-                    new JSONObject(json);
+        int outputSamples =
+                (int) Math.min(
+                        Integer.MAX_VALUE - 8L,
+                        stereoFrames * STT_RATE
+                                / SAMPLE_RATE + 2
+                );
 
-            String text =
-                    obj.optString("text", "").trim();
+        float[] output =
+                new float[outputSamples];
 
-            if (!text.isEmpty()) {
+        FileInputStream in =
+                new FileInputStream(pcmFile);
 
-                if (builder.length() > 0) {
-                    builder.append(" ");
+        byte[] buffer =
+                new byte[65536];
+
+        int outPos = 0;
+        long phase = 0;
+
+        int read;
+
+        while ((read = in.read(buffer)) > 0) {
+
+            int usable = read - (read % 4);
+
+            for (int i = 0;
+                 i < usable && outPos < output.length;
+                 i += 4) {
+
+                short left =
+                        (short) (
+                                (buffer[i] & 0xff)
+                                |
+                                (buffer[i + 1] << 8)
+                        );
+
+                short right =
+                        (short) (
+                                (buffer[i + 2] & 0xff)
+                                |
+                                (buffer[i + 3] << 8)
+                        );
+
+                float mono =
+                        (((int) left + (int) right)
+                                / 2.0f)
+                                / 32768.0f;
+
+                phase += STT_RATE;
+
+                if (phase >= SAMPLE_RATE) {
+
+                    phase -= SAMPLE_RATE;
+
+                    output[outPos++] = mono;
                 }
-
-                builder.append(text);
             }
+        }
 
-        } catch (Exception ignored) {}
+        in.close();
+
+        if (outPos == output.length) {
+            return output;
+        }
+
+        float[] trimmed =
+                new float[outPos];
+
+        System.arraycopy(
+                output,
+                0,
+                trimmed,
+                0,
+                outPos
+        );
+
+        return trimmed;
     }
 
     private void finishWithError(String message) {
